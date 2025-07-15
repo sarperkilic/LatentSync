@@ -89,7 +89,7 @@ def main(config, args):
     pipeline(
         video_path=args.video_path,
         audio_path=args.audio_path,
-        video_out_path=args.video_out_path,
+        video_out_path=None,
         num_frames=config.data.num_frames,
         num_inference_steps=args.inference_steps,
         guidance_scale=args.guidance_scale,
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--inference_ckpt_path", type=str, required=True)
     parser.add_argument("--video_path", type=str, required=True)
     parser.add_argument("--audio_path", type=str, required=True)
-    parser.add_argument("--video_out_path", type=str, required=True)
+    parser.add_argument("--video_out_path", type=str, required=False)
     parser.add_argument("--inference_steps", type=int, default=20)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--temp_dir", type=str, default="temp")
