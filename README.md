@@ -2,6 +2,39 @@
 
 ## My Work:
 
+# Part 1: Performance Optimization
+
+torch.profiler implemented to profile the current inference pipeline. For the inference, stage2_512.yaml config file is used.
+
+Warm-up run added (run_pipeline()) because the first execution of CUDA operations often includes one-time initialization costs, this period was excluded from profiling.
+
+Run the below command to run profiling script. 
+
+```bash
+./inference_profiler.sh
+```
+
+Based on the profiler output, Top 3 CUDA hotspots as below:
+
+- lipsync_inference_run (UNet forward) is consuming 144.1 seconds GPU time, whole-pipeline loop called once per ~10 frames. 
+- Data Copying (aten::copy_) operator is consuming 43 seconds CPU and 17.4 seconds (18.54%) of the total GPU time. Host→device or device→device copies when tensors are repeatedly cloned / moved.
+- Flash-Attention kernels, _flash_attention_forward, scaled_dot_product_attention (UNet self-attention blocks in the diffusion denoiser)
+
+<summary>Profiler Results (Top 15 CUDA ops)</summary>
+
+<p align="center">
+<img src="docs/baseline_profile.png" width=100%>
+<p>
+
+
+
+
+
+
+
+
+
+#
 
 
 ## 🔥 Updates
