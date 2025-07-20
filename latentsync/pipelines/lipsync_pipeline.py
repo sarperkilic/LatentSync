@@ -36,6 +36,7 @@ from ..utils.image_processor import ImageProcessor, load_fixed_mask
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
+import time
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -56,6 +57,8 @@ class LipsyncPipeline(DiffusionPipeline):
             EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
+        mask_image_path: str = "latentsync/utils/mask.png",
+        config = None
     ):
         super().__init__()
 
@@ -117,6 +120,11 @@ class LipsyncPipeline(DiffusionPipeline):
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
 
         self.set_progress_bar_config(desc="Steps")
+
+        height = config.data.resolution
+        mask_image = load_fixed_mask(height, mask_image_path) 
+        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+
 
     def enable_vae_slicing(self):
         self.vae.enable_slicing()
@@ -182,8 +190,7 @@ class LipsyncPipeline(DiffusionPipeline):
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )  # (b, c, f, h, w)
-        rand_device = "cpu" if device.type == "mps" else device
-        latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+        latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
         latents = latents.repeat(1, 1, num_frames, 1, 1)
 
         # scale the initial noise by the standard deviation required by the scheduler
@@ -267,6 +274,7 @@ class LipsyncPipeline(DiffusionPipeline):
         video_frames = video_frames[: len(faces)]
         out_frames = []
         print(f"Restoring {len(faces)} faces...")
+        torch.cuda.empty_cache()
         for index, face in enumerate(tqdm.tqdm(faces)):
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
@@ -276,6 +284,7 @@ class LipsyncPipeline(DiffusionPipeline):
             )
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
             out_frames.append(out_frame)
+        torch.cuda.empty_cache()
         return np.stack(out_frames, axis=0)
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
@@ -324,7 +333,6 @@ class LipsyncPipeline(DiffusionPipeline):
         guidance_scale: float = 1.5,
         weight_dtype: Optional[torch.dtype] = torch.float16,
         eta: float = 0.0,
-        mask_image_path: str = "latentsync/utils/mask.png",
         temp_dir: str = "temp",
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
@@ -334,12 +342,10 @@ class LipsyncPipeline(DiffusionPipeline):
         is_train = self.unet.training
         self.unet.eval()
 
-        check_ffmpeg_installed()
+        #check_ffmpeg_installed()
 
         # 0. Define call parameters
         device = self._execution_device
-        mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
         # 1. Default height and width to unet
@@ -364,7 +370,7 @@ class LipsyncPipeline(DiffusionPipeline):
         whisper_feature = self.audio_encoder.audio2feat(audio_path)
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
-        audio_samples = read_audio(audio_path)
+        audio_samples = read_audio(audio_path) # cpu float32 shape =153600
         video_frames = read_video(video_path, use_decord=False)
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
