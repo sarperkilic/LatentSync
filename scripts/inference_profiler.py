@@ -40,6 +40,9 @@ def main(config, args):
     is_fp16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
     dtype = torch.float16 if is_fp16_supported else torch.float32
 
+    print(f"CUDA Device: {torch.cuda.get_device_name()}")
+    print(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+
     print(f"Input video path: {args.video_path}")
     print(f"Input audio path: {args.audio_path}")
     print(f"Loaded checkpoint path: {args.inference_ckpt_path}")
@@ -67,7 +70,7 @@ def main(config, args):
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
-        device="cpu",
+        device="cuda",
     )
 
     unet = unet.to(dtype=dtype)
@@ -77,6 +80,7 @@ def main(config, args):
         audio_encoder=audio_encoder,
         unet=unet,
         scheduler=scheduler,
+        config=config
     ).to("cuda")
 
     # use DeepCache
@@ -109,7 +113,7 @@ def main(config, args):
         return total_generated_frames
     # ---------- warm-up pass ----------
     print("\n--- Starting warm-up runs (not profiled) ---")
-    _ = run_pipeline()          # first call will JIT kernels – ignore timing
+    _ = run_pipeline()         
     
     # --- Profiling Phase ---
     print("\n--- Starting profiled runs ---")
@@ -117,14 +121,7 @@ def main(config, args):
     t0 = time.perf_counter()
 
     with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                dir_name="tb",
-                worker_name="inference",
-                use_gzip=True)
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
     ) as prof:
         with record_function("lipsync_inference_run"):
             total_generated_frames = run_pipeline(out_path=None, inference_steps=args.inference_steps)
@@ -136,17 +133,12 @@ def main(config, args):
     print(f"\n✓ elapsed: {elapsed:0.2f}s  |  FPS: {fps:0.2f}")
 
     # ---------- 4. summary ----------
-    print("\n—- Profiler Results (Top 15 CUDA ops) —-")
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
+    print("\n—- Profiler Results (Top 10 CUDA ops) —-")
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
     print(f"\nSaving Chrome trace → ")
-    trace_path = "/home/codeway/LatentSync/inference_trace.json"
+    trace_path = "./inference_trace.json"
     prof.export_chrome_trace(trace_path)
-
-    # store metrics for later A/B comparison -------------
-    with open("benchmark_baseline.json", "w") as f:
-        json.dump({"fps": fps, "elapsed": elapsed}, f, indent=2)
-    print("Baseline metrics written to benchmark_baseline.json")
 
 
 if __name__ == "__main__":
