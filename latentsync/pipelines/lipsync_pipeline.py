@@ -127,6 +127,8 @@ class LipsyncPipeline(DiffusionPipeline):
         mask_image = load_fixed_mask(height, mask_image_path) 
         self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
 
+        is_train = self.unet.training
+        self.unet.eval()
 
     def enable_vae_slicing(self):
         self.vae.enable_slicing()
@@ -208,15 +210,21 @@ class LipsyncPipeline(DiffusionPipeline):
         mask = torch.nn.functional.interpolate(
             mask, size=(height // self.vae_scale_factor, width // self.vae_scale_factor)
         )
-        masked_image = masked_image.to(device=device, dtype=dtype)
+        #masked_image = masked_image.to(device=device, dtype=dtype)
+        if masked_image.dtype != dtype:
+            masked_image = masked_image.to(dtype=dtype)
+        
 
         # encode the mask image into latents space so we can concatenate it to the latents
         masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
         masked_image_latents = (masked_image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
 
         # aligning device to prevent device errors when concating it with the latent model input
-        masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
-        mask = mask.to(device=device, dtype=dtype)
+        #masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
+        #mask = mask.to(device=device, dtype=dtype)
+
+        if mask.dtype != dtype:
+            mask = mask.to(dtype=dtype)
 
         # assume batch size = 1
         mask = rearrange(mask, "f c h w -> 1 c f h w")
@@ -229,7 +237,9 @@ class LipsyncPipeline(DiffusionPipeline):
         return mask, masked_image_latents
 
     def prepare_image_latents(self, images, device, dtype, generator, do_classifier_free_guidance):
-        images = images.to(device=device, dtype=dtype)
+        if images.dtype != dtype or images.device != device:
+            images = images.to(device=device, dtype=dtype)
+
         image_latents = self.vae.encode(images).latent_dist.sample(generator=generator)
         image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         image_latents = rearrange(image_latents, "f c h w -> 1 c f h w")
@@ -245,8 +255,11 @@ class LipsyncPipeline(DiffusionPipeline):
     @staticmethod
     def paste_surrounding_pixels_back(decoded_latents, pixel_values, masks, device, weight_dtype):
         # Paste the surrounding pixels back, because we only want to change the mouth region
-        pixel_values = pixel_values.to(device=device, dtype=weight_dtype)
-        masks = masks.to(device=device, dtype=weight_dtype)
+        if pixel_values.dtype != weight_dtype or pixel_values.device != device:
+            pixel_values = pixel_values.to(device=device, dtype=weight_dtype)
+        if masks.dtype != weight_dtype:
+            masks = masks.to(dtype=weight_dtype)
+
         combined_pixel_values = decoded_latents * masks + pixel_values * (1 - masks)
         return combined_pixel_values
 
@@ -259,35 +272,72 @@ class LipsyncPipeline(DiffusionPipeline):
         return images
 
     def affine_transform_video(self, video_frames: np.ndarray):
-        faces = []
-        boxes = []
-        affine_matrices = []
-        print(f"Affine transforming {len(video_frames)} faces...")
-        for frame in tqdm.tqdm(video_frames):
-            face, box, affine_matrix = self.image_processor.affine_transform(frame)
-            faces.append(face)
-            boxes.append(box)
-            affine_matrices.append(affine_matrix)
+        """
+        Optimized version that processes frames in batches to reduce CPU-GPU transfers
+        """
+        # Convert numpy array to torch tensor and move to GPU
+        if isinstance(video_frames, np.ndarray):
+            video_tensor = torch.from_numpy(video_frames).to(device=self.image_processor.restorer.device) # cuda uint8 torch.Size([242, 1920, 1080, 3])  # not need to move to gpu
+        else:
+            video_tensor = video_frames
+            
+        # Ensure correct format (N, H, W, C)
+        if video_tensor.dim() == 4 and video_tensor.shape[1] == 3:  # N, C, H, W
+            video_tensor = rearrange(video_tensor, "n c h w -> n h w c")
+        
 
-        faces = torch.stack(faces)
-        return faces, boxes, affine_matrices
+        batch_size = 16  # Adjust based on GPU memory
+        faces_list = []
+        boxes_list = []
+        affine_matrices_list = []
+        
+        for i in range(0, len(video_tensor), batch_size):
+            batch = video_tensor[i:i + batch_size]
+            faces_batch, boxes_batch, affine_matrices_batch = self.image_processor.affine_transform_batch(batch)
+            
+            faces_list.append(faces_batch)
+            boxes_list.extend(boxes_batch)
+            affine_matrices_list.extend(affine_matrices_batch)
+        
+        faces = torch.cat(faces_list, dim=0)
+        return faces, boxes_list, affine_matrices_list
 
     def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+        """
+        Optimized version that reduces CPU-GPU transfers during restoration
+        """
         video_frames = video_frames[: len(faces)]
         out_frames = []
         print(f"Restoring {len(faces)} faces...")
         torch.cuda.empty_cache()
+        
+        # Convert video_frames to GPU tensor once
+        video_tensor = torch.from_numpy(video_frames).to(device=self.image_processor.restorer.device)
+        
         for index, face in enumerate(tqdm.tqdm(faces)):
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
-            face = torchvision.transforms.functional.resize(
-                face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
-            )
-            out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
+            
+            # Resize on GPU
+            face = torch.nn.functional.interpolate(
+                face.unsqueeze(0), 
+                size=(height, width), 
+                mode='bilinear', 
+                align_corners=False
+            ).squeeze(0)
+            
+            # Get frame from GPU tensor
+            frame = video_tensor[index]
+            if frame.dim() == 3 and frame.shape[0] == 3:  # C, H, W
+                frame = rearrange(frame, "c h w -> h w c")
+            
+            # Restore on GPU
+            out_frame = self.image_processor.restorer.restore_img_gpu(frame, face, affine_matrices[index])
             out_frames.append(out_frame)
+            
         torch.cuda.empty_cache()
-        return np.stack(out_frames, axis=0)
+        return torch.stack(out_frames, dim=0).cpu().numpy()
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
@@ -341,8 +391,7 @@ class LipsyncPipeline(DiffusionPipeline):
         callback_steps: Optional[int] = 1,
         **kwargs,
     ):
-        is_train = self.unet.training
-        self.unet.eval()
+        
 
         # 0. Define call parameters
         device = self._execution_device
@@ -368,10 +417,10 @@ class LipsyncPipeline(DiffusionPipeline):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         whisper_feature = self.audio_encoder.audio2feat(audio_path)
-        whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
+        whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps) # on cpu, f16, [50,384]x242
         #t0 = time.perf_counter()
         audio_samples = read_audio(audio_path) # cpu float32 shape =153600
-        video_frames = read_video(video_path, use_decord=False)
+        video_frames = read_video(video_path, use_decord=False) # on cpu, uint8, [250,1920,1080,3]
         #t1 = time.perf_counter()
         #print(f"time taken for read audio and video ::::: {t1 - t0}") #  3.892065822845325 >>>> 1.0029484420083463
 
@@ -392,7 +441,7 @@ class LipsyncPipeline(DiffusionPipeline):
             generator,
         )
 
-        num_inferences = math.ceil(len(whisper_chunks) / num_frames)
+        num_inferences = math.ceil(len(whisper_chunks) / num_frames) # 242/16 = 16
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
             if self.unet.add_audio_layer:
                 audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
@@ -404,7 +453,11 @@ class LipsyncPipeline(DiffusionPipeline):
                 audio_embeds = None
             inference_faces = faces[i * num_frames : (i + 1) * num_frames]
             latents = all_latents[:, :, i * num_frames : (i + 1) * num_frames]
-            ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
+            #ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
+            #    inference_faces, affine_transform=False
+            #)
+
+            ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images_batch(
                 inference_faces, affine_transform=False
             )
 
@@ -469,10 +522,7 @@ class LipsyncPipeline(DiffusionPipeline):
         print(int(synced_video_frames.shape[0]))
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
-        audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
-
-        if is_train:
-            self.unet.train()
+        audio_samples = audio_samples[:audio_samples_remain_length].numpy()
 
         if video_out_path:
             print(f"Saving video to {video_out_path}...")
