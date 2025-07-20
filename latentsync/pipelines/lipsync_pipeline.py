@@ -304,40 +304,70 @@ class LipsyncPipeline(DiffusionPipeline):
 
     def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
         """
-        Optimized version that reduces CPU-GPU transfers during restoration
+        Optimized version that processes frames in batches to reduce CPU-GPU transfers and improve performance
         """
         video_frames = video_frames[: len(faces)]
-        out_frames = []
         print(f"Restoring {len(faces)} faces...")
         torch.cuda.empty_cache()
         
         # Convert video_frames to GPU tensor once
         video_tensor = torch.from_numpy(video_frames).to(device=self.image_processor.restorer.device)
         
-        for index, face in enumerate(tqdm.tqdm(faces)):
-            x1, y1, x2, y2 = boxes[index]
+        # Process in batches for better GPU utilization
+        batch_size = 8  # Adjust based on GPU memory and face size
+        out_frames = []
+        
+        num_batches = (len(faces) + batch_size - 1) // batch_size
+        for i in tqdm.tqdm(range(0, len(faces), batch_size), total=num_batches, desc="Restoring video batches"):
+            batch_faces = faces[i:i + batch_size]
+            batch_boxes = boxes[i:i + batch_size]
+            batch_affine_matrices = affine_matrices[i:i + batch_size]
+            batch_video_frames = video_tensor[i:i + batch_size]
+            
+            # Process batch
+            batch_out_frames = self._restore_video_batch(
+                batch_faces, batch_video_frames, batch_boxes, batch_affine_matrices
+            )
+            out_frames.append(batch_out_frames)
+            
+        torch.cuda.empty_cache()
+        return torch.cat(out_frames, dim=0).cpu().numpy()
+
+    def _restore_video_batch(self, faces: torch.Tensor, video_frames: torch.Tensor, boxes: list, affine_matrices: list):
+        """
+        Process a batch of faces for video restoration using optimized batch processing
+        """
+        batch_size = len(faces)
+        
+        # Pre-resize all faces to their target sizes
+        resized_faces = []
+        for idx, (face, box) in enumerate(zip(faces, boxes)):
+            x1, y1, x2, y2 = box
             height = int(y2 - y1)
             width = int(x2 - x1)
             
             # Resize on GPU
-            face = torch.nn.functional.interpolate(
+            resized_face = torch.nn.functional.interpolate(
                 face.unsqueeze(0), 
                 size=(height, width), 
                 mode='bilinear', 
                 align_corners=False
             ).squeeze(0)
-            
-            # Get frame from GPU tensor
-            frame = video_tensor[index]
-            if frame.dim() == 3 and frame.shape[0] == 3:  # C, H, W
-                frame = rearrange(frame, "c h w -> h w c")
-            
-            # Restore on GPU
-            out_frame = self.image_processor.restorer.restore_img_gpu(frame, face, affine_matrices[index])
-            out_frames.append(out_frame)
-            
-        torch.cuda.empty_cache()
-        return torch.stack(out_frames, dim=0).cpu().numpy()
+            resized_faces.append(resized_face)
+        
+        # Stack resized faces into a batch
+        resized_faces_batch = torch.stack(resized_faces, dim=0)  # (N, C, H, W)
+        
+        # Ensure video frames are in correct format (N, H, W, C)
+        if video_frames.dim() == 4 and video_frames.shape[1] == 3:  # N, C, H, W
+            video_frames = rearrange(video_frames, "n c h w -> n h w c")
+        
+        # Use batch restoration for better performance
+        out_frames = self.image_processor.restorer.restore_img_batch_gpu(
+            video_frames, resized_faces_batch, affine_matrices
+        )
+        
+        return out_frames
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
