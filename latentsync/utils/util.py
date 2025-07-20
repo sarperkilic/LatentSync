@@ -31,6 +31,7 @@ import cv2
 from decord import AudioReader, VideoReader
 import shutil
 import subprocess
+import time
 
 
 # Machine epsilon for a float32 (single precision)
@@ -44,7 +45,20 @@ def read_json(filepath: str):
 
 
 def read_video(video_path: str, change_fps=True, use_decord=True):
-    if change_fps:
+    # get fps of video
+    command = (
+        f"ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate "
+        f"-of default=noprint_wrappers=1:nokey=1 {video_path}"
+    )
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    fps_raw = result.stdout.strip()
+    if '/' in fps_raw:
+        numerator, denominator = map(int, fps_raw.split('/'))
+        fps = numerator / denominator
+    else:
+        fps = float(fps_raw)
+
+    if fps!=25.0:
         temp_dir = "temp"
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
@@ -64,14 +78,18 @@ def read_video(video_path: str, change_fps=True, use_decord=True):
 
 
 def read_video_decord(video_path: str):
+    #t0 = time.perf_counter()
     vr = VideoReader(video_path)
     video_frames = vr[:].asnumpy()
     vr.seek(0)
+    #t1 = time.perf_counter()
+    # print(f"time taken for read video decord ::::: {t1 - t0}") #  3.892065822845325
     return video_frames
 
 
 def read_video_cv2(video_path: str):
     # Open the video file
+    #t0 = time.perf_counter()
     cap = cv2.VideoCapture(video_path)
 
     # Check if the video was opened successfully
@@ -96,8 +114,9 @@ def read_video_cv2(video_path: str):
 
     # Release the video capture object
     cap.release()
-
-    return np.array(frames)
+    #t1 = time.perf_counter()
+    #print(f"time taken for read video ::::: {t1 - t0}") #  0.7687596809118986
+    return np.array(frames) #250 list, each is (1920, 1080, 3) uint8
 
 
 def read_audio(audio_path: str, audio_sample_rate: int = 16000):

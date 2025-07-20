@@ -121,6 +121,8 @@ class LipsyncPipeline(DiffusionPipeline):
 
         self.set_progress_bar_config(desc="Steps")
 
+        check_ffmpeg_installed()
+
         height = config.data.resolution
         mask_image = load_fixed_mask(height, mask_image_path) 
         self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
@@ -342,8 +344,6 @@ class LipsyncPipeline(DiffusionPipeline):
         is_train = self.unet.training
         self.unet.eval()
 
-        #check_ffmpeg_installed()
-
         # 0. Define call parameters
         device = self._execution_device
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
@@ -369,9 +369,11 @@ class LipsyncPipeline(DiffusionPipeline):
 
         whisper_feature = self.audio_encoder.audio2feat(audio_path)
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
-
+        #t0 = time.perf_counter()
         audio_samples = read_audio(audio_path) # cpu float32 shape =153600
         video_frames = read_video(video_path, use_decord=False)
+        #t1 = time.perf_counter()
+        #print(f"time taken for read audio and video ::::: {t1 - t0}") #  3.892065822845325 >>>> 1.0029484420083463
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
 
