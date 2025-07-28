@@ -191,9 +191,19 @@ Total latency will depend on video length (number of frames) and chosen diffusio
 - Converting the U-Net model to a TensorRT engine. By compiling to TensorRT, we can benefit from kernel fusion and optimized CUDA kernels, reducing execution time per step.
 
 - Concurrent Model Instances: In addition to batching, Triton can run multiple model instances in parallel if resources allow. We could configure an instance_group for the model to deploy, say, one instance per GPU or even multiple instances per GPU if the model is not fully utilizing the GPU’s compute. Running two inferences concurrently on one GPU could approach 36GB which is borderline but might fit on 40GB if optimized. Max batch sizes must be tested carefully.
-- 
+ 
 
-##
+## Monitoring and Failures
+
+To ensure the system runs smoothly in production, comprehensive monitoring put in place:
+
+- Triton Metrics: Triton Inference Server natively provides a Metrics API (prometheus endpoint at :8002/metrics) exposing GPU utilization, memory, throughput, and latency stats. These metrics can be scraped using Prometheus. Key metrics to monitor per instance: GPU utilization %, GPU memory usage, inference request rate, queue wait time, and latency percentiles. This will tell if we are saturating resources or if requests are waiting too long in queue.
+
+- Profiling in Production: Periodically use Triton’s Performance Analyzer or custom tests to profile inference latency with current models. This ensures our optimizations remain effective and helps decide if we need to add more GPUs or tweak batch sizes.
+
+## Conclusion
+
+This plan leverages NVIDIA Triton Inference Server for high-performance serving with features like dynamic batching and model ensembles to pipeline audio and video models efficiently. By containerizing on Kubernetes, we achieve scalability (multiple GPUs, on-demand autoscaling) and resilience. Latency addressed by using GPU optimizations and allowing asynchronous processing, memory constraints by careful batching and model optimization on A100’s large memory, and failure modes by redundancy and timeouts. Additional measures like gRPC with CUDA shared memory will further optimize data throughput, avoiding network bottlenecks for large payloads. Finally, robust monitoring (Prometheus/Grafana, Triton’s metrics) and alerting will ensure the system remains reliable and any issues are detected early. With this architecture, LatentSync can be deployed as a production-grade, cost-efficient, and scalable service for on-demand lip-synced video generation.
 
 ## 🔥 Updates
 
