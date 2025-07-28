@@ -14,11 +14,23 @@ Run the below command to run profiling script.
 ./inference_profiler.sh
 ```
 
-Based on the profiler output, Top 3 CUDA hotspots as below:
+### Summary of Profiling Findings:
 
-- lipsync_inference_run (UNet forward) is consuming 144.1 seconds GPU time, whole-pipeline loop called once per ~10 frames. 
-- Data Copying (aten::copy_) operator is consuming 43 seconds CPU and 17.4 seconds (18.54%) of the total GPU time. Host→device or device→device copies when tensors are repeatedly cloned / moved.
-- Flash-Attention kernels, _flash_attention_forward, scaled_dot_product_attention (UNet self-attention blocks in the diffusion denoiser)
+Throughput: 1.77 FPS
+
+Total CUDA active time: ~80.2 s ⇒ GPU busy ≈ 80.2 / 136.4 ≈ 59% → ~41% idle / waiting on CPU or H2D/D2H copies.
+
+### Primary bottlenecks:
+
+aten::copy_ 72k calls, 47.0 s CPU, 20.1 s CUDA 
+Massive number of aten::copy_ calls → CPU-GPU sync & memory bandwidth bound; likely host<->device thrash and intermediate .cpu()/.numpy() hops.
+
+GPU underutilization (~59%) due to launch overheads, CPU-side preprocessing/postprocessing, and sync points inside lipsync_inference_run.
+
+(_flash_attention_forward, _scaled_dot_product_flash_attention) ~16.6 s (20.7% CUDA)
+Convolutions (aten::conv2d family, 14,3k calls) 15.8 s (19.7% CUDA)
+Attention + Conv blocks still large on-GPU (≈ ~40% of CUDA time combined)
+
 
 <summary>Profiler Results (Top 15 CUDA ops)</summary>
 
@@ -26,13 +38,108 @@ Based on the profiler output, Top 3 CUDA hotspots as below:
 <img src="docs/baseline_profile.png" width=100%>
 <p>
 
+Optimizations made:
+
+- Added `align_warp_face_gpu()` method that keeps data on GPU
+- Eliminates `.cpu().numpy()` conversion in the main processing path
+- Returns GPU tensors directly instead of numpy arrays
+- Uses `torch.nn.functional.interpolate` for GPU-based resizing
+- Added `affine_transform_batch()` method for batch processing
+- Added `preload_video_to_gpu()` method to preload video frames
+- Optimized `affine_transform()` to handle GPU tensors better
+- Updated `affine_transform_video()` to use batch processing
+- Updated `restore_video()` to minimize CPU-GPU transfers
+
+
+
+After the optimization, performance improvement achieved:
+
+Baseline → Optimized:
+
+Total time dropped from 136.4s → 95.2s (↓ 30%).
+
+FPS increased 1.77 → 2.54 (↑ 43.5%).
+
+CPU time dropped by 40s, mainly by removing aten::copy_ overhead.
+
+GPU utilization improved to ~80%, but attention+conv still 40% of CUDA time.
+
+Eval scripts is used woth baseline pipeline and optimized pipeline and there is no decrease in SyncNet confidence (./eval/eval_sync_conf.sh)
+
+Before  →  After
+
+ 8.39  →  8.58
+
+For remaining bottlenecks, TensorRT conversion can bring major speedup. 
+Flash Attention: Still consuming ~16.6s (unchanged)
+Convolution ops: Still consuming ~15.9s (unchanged)
 
 
 
 
 
 
+# Part 2: Quality Enhancement
 
+Below lip-sync related papers were analysed to propose improvements.
+
+Style-Preserving Lip Sync via Audio-Aware Style Reference (https://arxiv.org/html/2408.05412v1), 
+
+MUSETALK: REAL-TIME HIGH QUALITY LIP SYNCHRONIZATION WITH LATENT SPACE INPAINTING (https://arxiv.org/pdf/2410.10122v2),
+
+StyleTalk: One-shot Talking Head Generation with Controllable Speaking Styles (https://arxiv.org/pdf/2301.01081),
+
+SayAnything: Audio-Driven Lip Synchronization with Conditional Video Diffusion (https://arxiv.org/pdf/2502.11515),
+
+FLUENTLIP: A PHONEMES-BASED TWO-STAGE APPROACH FOR AUDIO-DRIVEN LIP SYNTHESIS WITH OPTICAL FLOW CONSISTENCY (https://arxiv.org/pdf/2504.04427)
+
+## 1- Observed Limitations in LatentSync:
+
+Based on hands-on evaluation of LatentSync v1.6 at 512×512 resolution the following residual limitations emerge:
+
+### Weak Exploitation of Phoneme-Level Semantics
+LatentSync relies solely on SyncNet, which delivers only coarse binary alignment (matching vs. non‑matching), missing fine-grained phoneme-level misalignments—especially on fast or ambiguous speech (e.g., fricatives or plosives)
+
+### Static Condition Balancing
+The model uses fixed guidance (CFG + SyncNet + TREPA), lacking dynamic per-frame balancing of identity, audio, and style signals. SayAnything shows that explicit condition modules improve lip-teeth coherence and region-specific fidelity
+
+### No speaking style modeling
+Individuals articulate differently even for identical utterances. Style‑Preserving Lip Sync shows style-aware reference injection preserves identity-specific articulation, a component LatentSync lacks
+
+### Uniform temporal consistency
+While TREPA improves general temporal consistency, it applies globally. No special weighting is given to critical mouth regions, leading to residual flicker in the lips/teeth area at high resolution
+
+### Efficiency and sampling steps
+LatentSync uses standard ε-prediction with 20 DDIM steps. Related systems like MuseTalk achieve fast inference with fewer steps via latent inpainting and strategic sampling, suggesting possible efficiency gains
+
+## 2- Proposed Improvements to Enhance Lip‑Sync Quality
+### Improvement 1: Phoneme‑Aware Alignment Head
+SyncNet provides only coarse supervision. FluentLip and related methods show that phoneme-level alignment (via CTC or viseme training) significantly improves lip intelligibility and accuracy.
+With this one, more precise lip movements, especially for subtle phonemes (e.g., “s”, “th”) and reduction in lip‑sync errors and improved SyncConf scores are expected.
+
+### Improvement 2: Weighted Temporal Losses 
+Flicker and jitter in mouth/teeth regions may persist because TREPA does not focus on them. Weighting the loss over a mouth mask can better drive consistency where it matters. Modifying TREPA to a weighted version emphasizing mouth ROI can generate result of higher temporal smoothness in lips/teeth movements; fewer artifacts, improved perceived synchronization.
+
+### Improvement 3: Dynamic Conditioning Weighting
+Inspired by SayAnything’s modular conditioning architecture, dynamically balancing identity, audio, and optional style signals per frame and region may resolve conflicts between identity preservation and sync accuracy. Adding a simple balancing module that outputs per-frame weights for audio vs. identity conditioning, applied in cross-attention layers. For POC, similar implement like increases audio weight during high-expression segments, decreasing it in static ones can be applied. As a result, better naturalness in lip motion, preserving expressive styles while maintaining identity can be expected.
+
+## 3- Implementation Plan for Proof-of-Concept
+ I recommend Improvement 1 (Phoneme‑Aware Head) since the target is observed issues directly.
+
+ To implement, HDTF or Voxceleb2 data can be used to generate dataset.
+ Whisper can be used to generate forced phoneme alignments for these frames. Add Phoneme head and CTC loss, train stage‑2 only. 
+
+## 3- Reasoning and Expected Impact:
+
+ With minimal added complexity to LatentSync v1.6., Phoneme‑Aware Supervision will deliver finer-grained mouth motion correspondence to speech, reducing lip‑sync mismatches that SyncNet alone misses. 
+ 
+ The phonetic information from Whisper embeddings provides the "what" of speech, while the emotion embedding provides the "how". By combining these two sources of information, the model can learn to generate lip movements that are not only accurate in terms of pronunciation but also congruent with the emotional tone of the speaker. This is a more holistic approach to lip-sync, moving beyond simple phonetic-to-visual mapping.
+
+Increased Realism and Expressiveness: The generated videos will be significantly more realistic and expressive. The model will be able to capture subtle variations in lip shape, muscle tension around the mouth, and even slight changes in facial expression that are tied to emotion.
+
+Improved Naturalness: The lip movements will appear more natural and less robotic, as they will be influenced by the prosody and emotional content of the speech.
+
+Wider Range of Applications: This improvement would make LatentSync more suitable for applications where emotional expression is crucial, such as in virtual avatars, character animation for films and games, and even in more advanced video dubbing where preserving the original actor's emotional performance is key.
 
 #
 
