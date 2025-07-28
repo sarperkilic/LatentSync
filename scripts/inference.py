@@ -71,6 +71,7 @@ def main(config, args):
         audio_encoder=audio_encoder,
         unet=unet,
         scheduler=scheduler,
+        config=config
     ).to("cuda")
 
     # use DeepCache
