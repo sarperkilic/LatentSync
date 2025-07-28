@@ -135,7 +135,7 @@ Inspired by SayAnything’s modular conditioning architecture, dynamically balan
  To implement, HDTF or Voxceleb2 data can be used to generate dataset.
  Whisper can be used to generate forced phoneme alignments for these frames. Add Phoneme head and CTC loss, train stage‑2 only. 
 
-## 3- Reasoning and Expected Impact:
+## 4- Reasoning and Expected Impact:
 
  With minimal added complexity to LatentSync v1.6., Phoneme‑Aware Supervision will deliver finer-grained mouth motion correspondence to speech, reducing lip‑sync mismatches that SyncNet alone misses. 
  
