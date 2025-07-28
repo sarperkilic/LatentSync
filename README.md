@@ -32,10 +32,10 @@ Convolutions (aten::conv2d family, 14,3k calls) 15.8 s (19.7% CUDA)
 Attention + Conv blocks still large on-GPU (≈ ~40% of CUDA time combined)
 
 
-<summary>Profiler Results (Top 15 CUDA ops)</summary>
+<summary>Baseline Profiler Results (Top 15 CUDA ops)</summary>
 
 <p align="center">
-<img src="docs/baseline_profile.png" width=100%>
+<img src="docs/baseline.png" width=100%>
 <p>
 
 Optimizations made:
@@ -53,6 +53,12 @@ Optimizations made:
 
 
 After the optimization, performance improvement achieved:
+
+<summary>Optimized Profiler Results (Top 15 CUDA ops)</summary>
+
+<p align="center">
+<img src="docs/optimized_profile.png" width=100%>
+<p>
 
 Baseline → Optimized:
 
