@@ -205,6 +205,47 @@ To ensure the system runs smoothly in production, comprehensive monitoring put i
 
 This plan leverages NVIDIA Triton Inference Server for high-performance serving with features like dynamic batching and model ensembles to pipeline audio and video models efficiently. By containerizing on Kubernetes, we achieve scalability (multiple GPUs, on-demand autoscaling) and resilience. Latency addressed by using GPU optimizations and allowing asynchronous processing, memory constraints by careful batching and model optimization on A100’s large memory, and failure modes by redundancy and timeouts. Additional measures like gRPC with CUDA shared memory will further optimize data throughput, avoiding network bottlenecks for large payloads. Finally, robust monitoring (Prometheus/Grafana, Triton’s metrics) and alerting will ensure the system remains reliable and any issues are detected early. With this architecture, LatentSync can be deployed as a production-grade, cost-efficient, and scalable service for on-demand lip-synced video generation.
 
+## TensorRT Implementation
+
+To achieve further performance gains beyond the initial optimizations, TensorRT conversion was implemented for the core inference models.
+
+### Conversion Process
+
+The TensorRT implementation involved a two-stage conversion process:
+
+1. **ONNX Export**: Models were first converted to ONNX format using `tensorrt_conversion/convert_to_onnx.py`
+   - VAE Encoder (with sampling included)
+   - VAE Decoder  
+   - UNet3D diffusion model
+
+2. **TensorRT Engine Building**: ONNX models were then converted to optimized TensorRT engines using `tensorrt_conversion/convert_to_tensorrt.py`
+   - FP16 precision enabled 
+
+### TensorRT Inference Pipeline
+
+TensorRT inference pipeline was implemented in `scripts/inference_tensorrt_optimized.py`:
+
+- **TensorRTEngine**: Generic wrapper for VAE encoder/decoder TensorRT engines
+- **TensorRTUNet3DEngine**: Specialized wrapper for UNet3D with multiple input handling
+- **TensorRTUNetWrapper**: Interface compatibility layer for the diffusion pipeline
+- **TensorRTLipsyncPipeline**: Complete pipeline using TensorRT-accelerated components
+
+### Performance Results
+
+**Baseline → Optimized → TensorRT:**
+
+- **Total time**: 136.4s → 95.2s → 50.36s (↓ 63% overall)
+- **FPS**: 1.77 → 2.54 → 4.77 (↑ 169% overall)
+
+TensorRT implementation achieved an additional **47% speedup** over the optimized pipeline and **63% improvement** over baseline.
+
+### Known Issues
+
+ **Video Deformation**: The current TensorRT implementation produces output videos with visual deformation compared to the original PyTorch pipeline. This issue is likely due to:
+
+- Potential numerical instabilities in the converted models
+- Shape handling differences in the TensorRT execution context
+
 ## 🔥 Updates
 
 
