@@ -205,7 +205,7 @@ To ensure the system runs smoothly in production, comprehensive monitoring put i
 
 This plan leverages NVIDIA Triton Inference Server for high-performance serving with features like dynamic batching and model ensembles to pipeline audio and video models efficiently. By containerizing on Kubernetes, we achieve scalability (multiple GPUs, on-demand autoscaling) and resilience. Latency addressed by using GPU optimizations and allowing asynchronous processing, memory constraints by careful batching and model optimization on A100’s large memory, and failure modes by redundancy and timeouts. Additional measures like gRPC with CUDA shared memory will further optimize data throughput, avoiding network bottlenecks for large payloads. Finally, robust monitoring (Prometheus/Grafana, Triton’s metrics) and alerting will ensure the system remains reliable and any issues are detected early. With this architecture, LatentSync can be deployed as a production-grade, cost-efficient, and scalable service for on-demand lip-synced video generation.
 
-## TensorRT Implementation
+# Part 4: TensorRT Implementation
 
 To achieve further performance gains beyond the initial optimizations, TensorRT conversion was implemented for the core inference models.
 
